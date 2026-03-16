@@ -1,7 +1,4 @@
-﻿using System.Buffers.Binary;
-using System.Text;
-
-namespace Mp4ls;
+﻿namespace Mp4ls;
 
 class Program
 {
@@ -20,7 +17,7 @@ class Program
         if (string.IsNullOrEmpty(targetPattern))
         {
             Console.WriteLine("No path provided.");
-            return 1;
+            return 2;
         }
 
         string[] filesToProcess;
@@ -32,21 +29,30 @@ class Program
                 string pattern = Path.GetFileName(targetPattern);
                 if (string.IsNullOrEmpty(dir)) dir = ".";
                 filesToProcess = Directory.GetFiles(dir, pattern);
-                if (filesToProcess.Length == 0) return 0;
+                if (filesToProcess.Length == 0) return 3;
             }
             else
             {
-                if (!File.Exists(targetPattern)) return 1;
+                if (!File.Exists(targetPattern)) return 4;
                 filesToProcess = [targetPattern];
             }
         }
-        catch { return 1; }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+        {
+            Console.WriteLine($"{ex.GetType().Name}: {ex.Message}");
+            return 5;
+        }
 
-        byte[] peekBuffer = new byte[8];
         foreach (string file in filesToProcess)
         {
-            try { Mp4HeaderParser.Parse(file, isVerbose, peekBuffer); }
-            catch { }
+            try
+            {
+                Mp4HeaderParser.Parse(file, isVerbose);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException)
+            {
+                Console.WriteLine($"{file}: {ex.GetType().Name}: {ex.Message}");
+            }
         }
         return 0;
     }

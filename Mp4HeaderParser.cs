@@ -3,15 +3,16 @@ using System.Text;
 
 namespace Mp4ls;
 
-public class Mp4HeaderParser
+public static class Mp4HeaderParser
 {
     private static readonly string[] ContainerBoxes = ["moov", "trak", "mdia", "minf", "stbl", "stsd", "sinf"];
 
-    public static void Parse(string filePath, bool isVerbose, byte[] peekBuffer)
+    public static void Parse(string filePath, bool isVerbose)
     {
-        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 786432, FileOptions.RandomAccess);
+        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 786432);
         if (fs.Length < 8) return;
 
+        byte[] peekBuffer = new byte[8];
         fs.ReadExactly(peekBuffer, 0, 8);
 
         // MKV Check
@@ -55,33 +56,6 @@ public class Mp4HeaderParser
         }
     }
 
-    private static void PrintConsolidatedSummary(ParseContext ctx)
-    {
-        Console.WriteLine($"  {"Format:",-21} {ctx.MajorBrand}{ctx.BrandExplanation}");
-        if (ctx.DurationSeconds > 0)
-        {
-            TimeSpan t = TimeSpan.FromSeconds(ctx.DurationSeconds);
-            Console.WriteLine($"  {"Duration:",-21} {(int)t.TotalMinutes} min {t.Seconds} sec");
-            Console.WriteLine($"  {"Bitrate:",-21} {ctx.BitrateMbps:F2} Mbps");
-        }
-        Console.WriteLine("  Tracks:");
-        foreach (var track in ctx.Tracks)
-        {
-            Console.ForegroundColor = track.HandlerCode == "vide" ? ConsoleColor.Cyan : ConsoleColor.Green;
-
-            // Only add the colon if we actually have data (codec or res) to display
-            bool hasData = !string.IsNullOrEmpty(track.Codec) || !string.IsNullOrEmpty(track.Resolution);
-            string typeLabel = track.Type + (hasData ? ":" : "");
-
-            string resPart = (track.HandlerCode == "vide" && !string.IsNullOrEmpty(track.Resolution)) ? $" [{track.Resolution}]" : "";
-            string codecPart = track.Codec;
-            string drm = track.IsDrm ? " [DRM-protected]" : "";
-
-            Console.WriteLine($"    -> {typeLabel,-16} {codecPart}{resPart}{drm}");
-            Console.ResetColor();
-        }
-    }
-
     private static long FindMoovOffset(FileStream fs)
     {
         fs.Seek(0, SeekOrigin.Begin);
@@ -92,7 +66,13 @@ public class Mp4HeaderParser
             long size = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(0, 4));
             string type = Encoding.ASCII.GetString(header, 4, 4);
             if (type == "moov") return fs.Position - 8;
-            if (size == 1) { byte[] ext = new byte[8]; fs.ReadExactly(ext, 0, 8); size = BinaryPrimitives.ReadInt64BigEndian(ext); fs.Seek(size - 16, SeekOrigin.Current); }
+            if (size == 1)
+            {
+                byte[] ext = new byte[8];
+                fs.ReadExactly(ext, 0, 8);
+                size = BinaryPrimitives.ReadInt64BigEndian(ext);
+                fs.Seek(size - 16, SeekOrigin.Current);
+            }
             else if (size == 0) break;
             else fs.Seek(size - 8, SeekOrigin.Current);
         }
@@ -111,8 +91,18 @@ public class Mp4HeaderParser
             string boxType = Encoding.ASCII.GetString(header, 4, 4);
             long dataSize = boxSize - 8;
 
-            if (boxSize == 1) { byte[] ext = new byte[8]; fs.ReadExactly(ext, 0, 8); boxSize = BinaryPrimitives.ReadInt64BigEndian(ext); dataSize = boxSize - 16; }
-            if (boxType == "moof" || boxType == "mdat") { fs.Seek(dataSize, SeekOrigin.Current); continue; }
+            if (boxSize == 1)
+            {
+                byte[] ext = new byte[8];
+                fs.ReadExactly(ext, 0, 8);
+                boxSize = BinaryPrimitives.ReadInt64BigEndian(ext);
+                dataSize = boxSize - 16;
+            }
+            if (boxType == "moof" || boxType == "mdat")
+            {
+                fs.Seek(dataSize, SeekOrigin.Current);
+                continue;
+            }
 
             if (isVerbose)
             {
@@ -121,12 +111,20 @@ public class Mp4HeaderParser
                 Console.ResetColor();
             }
 
-            if (boxType == "trak") { ctx.CurrentTrack = new TrackInfo(); ctx.Tracks.Add(ctx.CurrentTrack); }
+            if (boxType == "trak")
+            {
+                ctx.CurrentTrack = new TrackInfo();
+                ctx.Tracks.Add(ctx.CurrentTrack);
+            }
 
             if (boxType == "mvhd") ParseMvhd(fs, dataSize, ctx);
             else if (boxType is "encv" or "avc1" or "hev1" or "hvc1" or "dvh1" or "enca" or "mp4a")
             {
-                if (ctx.CurrentTrack != null) { ctx.CurrentTrack.Codec = boxType; ctx.CurrentTrack.IsDrm = boxType is "encv" or "hev1" or "enca"; }
+                if (ctx.CurrentTrack != null)
+                {
+                    ctx.CurrentTrack.Codec = boxType;
+                    ctx.CurrentTrack.IsDrm = boxType is "encv" or "hev1" or "enca";
+                }
                 fs.Seek(dataSize, SeekOrigin.Current);
             }
             else if (Array.Exists(ContainerBoxes, c => c == boxType))
@@ -155,7 +153,8 @@ public class Mp4HeaderParser
 
     private static void ParseTrackHeader(FileStream fs, int dataSize, ParseContext ctx)
     {
-        byte[] b = new byte[dataSize]; fs.ReadExactly(b, 0, dataSize);
+        byte[] b = new byte[dataSize];
+        fs.ReadExactly(b, 0, dataSize);
         int off = 4 + (b[0] == 1 ? 32 : 20) + 16 + 36;
         if (off + 8 <= dataSize && ctx.CurrentTrack != null)
         {
@@ -173,7 +172,8 @@ public class Mp4HeaderParser
 
     private static void ParseHandler(FileStream fs, int dataSize, ParseContext ctx)
     {
-        byte[] b = new byte[dataSize]; fs.ReadExactly(b, 0, dataSize);
+        byte[] b = new byte[dataSize];
+        fs.ReadExactly(b, 0, dataSize);
         if (dataSize >= 12 && ctx.CurrentTrack != null)
         {
             string h = Encoding.ASCII.GetString(b, 8, 4);
@@ -182,6 +182,33 @@ public class Mp4HeaderParser
                                     h == "soun" ? "Audio Track" :
                                     (h == "text" || h == "subt" || h == "sbtl") ? "Subtitle Track" :
                                     $"Track ({h})";
+        }
+    }
+
+    private static void PrintConsolidatedSummary(ParseContext ctx)
+    {
+        Console.WriteLine($"  {"Format:",-21} {ctx.MajorBrand}{ctx.BrandExplanation}");
+        if (ctx.DurationSeconds > 0)
+        {
+            TimeSpan t = TimeSpan.FromSeconds(ctx.DurationSeconds);
+            Console.WriteLine($"  {"Duration:",-21} {(int)t.TotalMinutes} min {t.Seconds} sec");
+            Console.WriteLine($"  {"Bitrate:",-21} {ctx.BitrateMbps:F2} Mbps");
+        }
+        Console.WriteLine("  Tracks:");
+        foreach (var track in ctx.Tracks)
+        {
+            Console.ForegroundColor = track.HandlerCode == "vide" ? ConsoleColor.Cyan : ConsoleColor.Green;
+
+            // Only add the colon if we actually have data (codec or res) to display
+            bool hasData = !string.IsNullOrEmpty(track.Codec) || !string.IsNullOrEmpty(track.Resolution);
+            string typeLabel = track.Type + (hasData ? ":" : "");
+
+            string resPart = (track.HandlerCode == "vide" && !string.IsNullOrEmpty(track.Resolution)) ? $" [{track.Resolution}]" : "";
+            string codecPart = track.Codec;
+            string drm = track.IsDrm ? " [DRM-protected]" : "";
+
+            Console.WriteLine($"    -> {typeLabel,-16} {codecPart}{resPart}{drm}");
+            Console.ResetColor();
         }
     }
 }
