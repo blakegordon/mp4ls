@@ -6,12 +6,14 @@ class Program
     {
         if (args.Length == 0)
         {
-            Console.WriteLine("Usage: mp4ls [-v] <path_to_mp4_file_or_wildcard>");
+            Console.WriteLine("Usage: mp4ls [-v] [--cold] <path_to_mp4_file_or_wildcard>");
             Console.WriteLine("  -v, --verbose    Show structural MP4 boxes during parsing");
+            Console.WriteLine("  --cold           Force evict the file from the Windows Standby Cache before parsing");
             return 1;
         }
 
         bool isVerbose = args.Contains("-v") || args.Contains("--verbose");
+        bool isColdRun = args.Contains("--cold");
         string? targetPattern = args.LastOrDefault(a => !a.StartsWith('-'));
 
         if (string.IsNullOrEmpty(targetPattern))
@@ -45,6 +47,15 @@ class Program
 
         foreach (string file in filesToProcess)
         {
+            if (isColdRun)
+            {
+                // 0x20000000 is the Win32 FILE_FLAG_NO_BUFFERING constant.
+                // Opening and instantly closing the file with this flag forces 
+                // Windows to dump it from the RAM Standby List.
+                const int FILE_FLAG_NO_BUFFERING = 0x20000000;
+                using var evictFs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, (FileOptions)FILE_FLAG_NO_BUFFERING);
+            }
+
             try
             {
                 Mp4HeaderParser.Parse(file, isVerbose);

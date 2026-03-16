@@ -9,7 +9,7 @@ public static class Mp4HeaderParser
 
     public static void Parse(string filePath, bool isVerbose)
     {
-        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 786432);
+        using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.RandomAccess);
         if (fs.Length < 8) return;
 
         byte[] peekBuffer = new byte[8];
@@ -47,16 +47,23 @@ public static class Mp4HeaderParser
             context.BrandExplanation = context.MajorBrand == "iso6" ? " (MP4 Base Media version 6)" : "";
         }
 
-        long moovOffset = FindMoovOffset(fs);
-        if (moovOffset != -1)
+        // The "Slurp" Optimization: Find the moov box, load it entirely into RAM, and parse from memory
+        (long Offset, long Size) = FindMoovBox(fs);
+        if (Offset != -1 && Size <= int.MaxValue)
         {
-            fs.Seek(moovOffset, SeekOrigin.Begin);
-            ParseBoxes(fs, fs.Length, 0, isVerbose, context);
+            fs.Seek(Offset, SeekOrigin.Begin);
+
+            byte[] moovBuffer = new byte[(int)Size];
+            fs.ReadExactly(moovBuffer, 0, (int)Size);
+
+            using var memoryStream = new MemoryStream(moovBuffer);
+            ParseBoxes(memoryStream, Size, 0, isVerbose, context);
+
             PrintConsolidatedSummary(context);
         }
     }
 
-    private static long FindMoovOffset(FileStream fs)
+    private static (long Offset, long Size) FindMoovBox(FileStream fs)
     {
         fs.Seek(0, SeekOrigin.Begin);
         byte[] header = new byte[8];
@@ -65,21 +72,31 @@ public static class Mp4HeaderParser
             fs.ReadExactly(header, 0, 8);
             long size = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(0, 4));
             string type = Encoding.ASCII.GetString(header, 4, 4);
-            if (type == "moov") return fs.Position - 8;
+
             if (size == 1)
             {
                 byte[] ext = new byte[8];
                 fs.ReadExactly(ext, 0, 8);
                 size = BinaryPrimitives.ReadInt64BigEndian(ext);
+                if (type == "moov") return (fs.Position - 16, size);
                 fs.Seek(size - 16, SeekOrigin.Current);
             }
-            else if (size == 0) break;
-            else fs.Seek(size - 8, SeekOrigin.Current);
+            else if (size == 0)
+            {
+                if (type == "moov") return (fs.Position - 8, fs.Length - fs.Position + 8);
+                break;
+            }
+            else
+            {
+                if (type == "moov") return (fs.Position - 8, size);
+                fs.Seek(size - 8, SeekOrigin.Current);
+            }
         }
-        return -1;
+        return (-1, 0);
     }
 
-    private static void ParseBoxes(FileStream fs, long endPosition, int depth, bool isVerbose, ParseContext ctx)
+    // Notice we now accept 'Stream' instead of 'FileStream' so we can pass our MemoryStream
+    private static void ParseBoxes(Stream fs, long endPosition, int depth, bool isVerbose, ParseContext ctx)
     {
         byte[] header = new byte[8];
         string indent = new(' ', depth * 2);
@@ -139,7 +156,7 @@ public static class Mp4HeaderParser
         }
     }
 
-    private static void ParseMvhd(FileStream fs, long dataSize, ParseContext ctx)
+    private static void ParseMvhd(Stream fs, long dataSize, ParseContext ctx)
     {
         byte[] buf = new byte[32];
         fs.ReadExactly(buf, 0, 32);
@@ -151,7 +168,7 @@ public static class Mp4HeaderParser
         fs.Seek(dataSize - 32, SeekOrigin.Current);
     }
 
-    private static void ParseTrackHeader(FileStream fs, int dataSize, ParseContext ctx)
+    private static void ParseTrackHeader(Stream fs, int dataSize, ParseContext ctx)
     {
         byte[] b = new byte[dataSize];
         fs.ReadExactly(b, 0, dataSize);
@@ -170,11 +187,11 @@ public static class Mp4HeaderParser
         }
     }
 
-    private static void ParseHandler(FileStream fs, int dataSize, ParseContext ctx)
+    private static void ParseHandler(Stream fs, int dataSize, ParseContext ctx)
     {
         byte[] b = new byte[dataSize];
         fs.ReadExactly(b, 0, dataSize);
-        if (dataSize >= 12 && ctx.CurrentTrack != null)
+        if (dataSize >= 12 && ctx.CurrentTrack != null && string.IsNullOrEmpty(ctx.CurrentTrack.HandlerCode))
         {
             string h = Encoding.ASCII.GetString(b, 8, 4);
             ctx.CurrentTrack.HandlerCode = h;
@@ -199,7 +216,6 @@ public static class Mp4HeaderParser
         {
             Console.ForegroundColor = track.HandlerCode == "vide" ? ConsoleColor.Cyan : ConsoleColor.Green;
 
-            // Only add the colon if we actually have data (codec or res) to display
             bool hasData = !string.IsNullOrEmpty(track.Codec) || !string.IsNullOrEmpty(track.Resolution);
             string typeLabel = track.Type + (hasData ? ":" : "");
 
